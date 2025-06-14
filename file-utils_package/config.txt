@@ -1,0 +1,5 @@
+;!@Install@!UTF-8!
+Title="file-utils v0.3.0 - Quantum-Enhanced File Security"
+BeginPrompt="Install file-utils by whispr.dev?\n\nThis will install the quantum-enhanced file encryption and secure deletion tool."
+RunProgram="install.bat"
+;!@InstallEnd@!
