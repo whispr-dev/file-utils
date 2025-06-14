@@ -1,227 +1,316 @@
+# make_installer_DEBUG.ps1 - Shows what's happening!
 
-#  make install script, da?
+param(
+    [switch]$Verbose,
+    [switch]$Debug
+)
+
+# Enable verbose output if requested
+if ($Verbose) {
+    $VerbosePreference = 'Continue'
+}
+
+if ($Debug) {
+    $DebugPreference = 'Continue'
+    $VerbosePreference = 'Continue'
+}
+
+# ALWAYS show basic progress
+$ErrorActionPreference = 'Continue'  # Don't stop on errors, show them
+
+Write-Host "=== make_installer_DEBUG.ps1 Starting ===" -ForegroundColor Cyan
+Write-Host "Current directory: $(Get-Location)" -ForegroundColor Gray
+Write-Host "PowerShell version: $($PSVersionTable.PSVersion)" -ForegroundColor Gray
+Write-Host ""
 
 ####################
-
-####################
-#  step 1. make archive
+# STEP 0: Check Prerequisites
 ####################
 
-# Fixed 7-Zip build script for PowerShell
+Write-Host "STEP 0: Checking prerequisites..." -ForegroundColor Yellow
 
-Write-Host "Building file-utils installer..." -ForegroundColor Green
+$requiredFiles = @(
+    "7za.exe",
+    "file-utils.exe", 
+    "install.bat",
+    "UNWISE.bat",
+    "README",
+    "LICENSE"
+)
 
-# Step 1: Create the 7z archive (FIXED COMMAND)
-Write-Host "Creating 7z archive..." -ForegroundColor Yellow
-
-Start-Process -FilePath ".\7za.exe" -ArgumentList "a", "-t7z", "archive.7z", "file-utils.exe", "README", "LICENSE", "docs\", "install.bat", "UNWISE.bat" -Wait -NoNewWindow
-
-#  if ($LASTEXITCODE -ne 0) {
-#      Write-Host "Failed to create 7z archive" -ForegroundColor Red
-#      exit 1
-#  }
-
-Write-Host "Created archive.7z" -ForegroundColor Green
-
-#####################
-#  step 2. make ps1 script
-#####################
-
-# make-truly-self-extracting.ps1 - EMBED EVERYTHING!
-
-Write-Host "Creating TRULY self-extracting installer..." -ForegroundColor Green
-
-# Check required files
-$requiredFiles = @("archive.7z", "7za.exe")
+Write-Host "Required files check:" -ForegroundColor Gray
+$missingFiles = @()
 foreach ($file in $requiredFiles) {
-    if (-not (Test-Path $file)) {
-        Write-Host "ERROR: $file not found!" -ForegroundColor Red
-        exit 1
+    if (Test-Path $file) {
+        $size = [math]::Round((Get-Item $file).Length / 1024, 1)
+        Write-Host "  ✅ Found: $file ($size KB)" -ForegroundColor Green
+    } else {
+        Write-Host "  ❌ Missing: $file" -ForegroundColor Red
+        $missingFiles += $file
     }
 }
 
-# Read and encode both files
-Write-Host "Encoding archive.7z..." -ForegroundColor Yellow
-$archiveBytes = [System.IO.File]::ReadAllBytes("archive.7z")
-$base64Archive = [Convert]::ToBase64String($archiveBytes)
-
-Write-Host "Encoding 7za.exe..." -ForegroundColor Yellow
-$7zaBytes = [System.IO.File]::ReadAllBytes("7za.exe")
-$base647za = [Convert]::ToBase64String($7zaBytes)
-
-$archiveKB = [math]::Round($archiveBytes.Length / 1024, 1)
-$7zaKB = [math]::Round($7zaBytes.Length / 1024, 1)
-$totalKB = $archiveKB + $7zaKB
-
-Write-Host "Archive: $archiveKB KB, 7za.exe: $7zaKB KB, Total: $totalKB KB" -ForegroundColor Cyan
-
-# Create the TRULY self-extracting installer
-$installerContent = @"
-# file-utils TRULY Self-Extracting Installer
-# Contains both archive and extractor - NO DEPENDENCIES!
-
-Write-Host ""
-Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "                    file-utils v0.3.0                          " -ForegroundColor Cyan
-Write-Host "              Quantum-Enhanced File Security                    " -ForegroundColor Cyan
-Write-Host "                   by whispr.dev                               " -ForegroundColor Cyan
-Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host ""
-
-`$response = Read-Host "Install file-utils? (Y/N)"
-if (`$response -notmatch "^[Yy]") {
-    Write-Host "Installation cancelled." -ForegroundColor Yellow
-    exit 0
+if ($missingFiles.Count -gt 0) {
+    Write-Host ""
+    Write-Host "ERROR: Missing required files:" -ForegroundColor Red
+    $missingFiles | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+    Write-Host ""
+    Write-Host "Current directory contents:" -ForegroundColor Yellow
+    Get-ChildItem | ForEach-Object { Write-Host "  $($_.Name)" -ForegroundColor White }
+    Read-Host "Press Enter to exit"
+    exit 1
 }
 
-Write-Host "Starting installation..." -ForegroundColor Green
+Write-Host "✅ All required files found!" -ForegroundColor Green
 
-# Create temp directory
-`$tempDir = "`$env:TEMP\file-utils_install-`$(Get-Random)"
-New-Item -ItemType Directory -Path `$tempDir -Force | Out-Null
-Write-Host "Temp directory: `$tempDir" -ForegroundColor Gray
+####################
+# STEP 1: Create Archive
+####################
+
+Write-Host ""
+Write-Host "STEP 1: Creating 7z archive..." -ForegroundColor Yellow
+
+# Clean up old archive
+if (Test-Path "archive.7z") {
+    Write-Host "Removing existing archive.7z..." -ForegroundColor Gray
+    Remove-Item "archive.7z" -Force
+}
 
 try {
-    Write-Host "Extracting embedded 7za.exe..." -ForegroundColor Yellow
+    Write-Host "Running 7za.exe command..." -ForegroundColor Gray
+    Write-Host "Command: .\7za.exe a -t7z archive.7z file-utils.exe README LICENSE docs\ install.bat UNWISE.bat" -ForegroundColor Gray
     
-    # Extract embedded 7za.exe
-    `$7zaData = "$base647za"
-    `$7zaBytes = [Convert]::FromBase64String(`$7zaData)
-    `$7zaPath = "`$tempDir\7za.exe"
-    [System.IO.File]::WriteAllBytes(`$7zaPath, `$7zaBytes)
+    $result = Start-Process -FilePath ".\7za.exe" -ArgumentList "a", "-t7z", "archive.7z", "file-utils.exe", "README", "LICENSE", "docs\", "install.bat", "UNWISE.bat" -Wait -NoNewWindow -PassThru
     
-    Write-Host "Extracting embedded archive..." -ForegroundColor Yellow
+    Write-Host "7za.exe exit code: $($result.ExitCode)" -ForegroundColor Gray
     
-    # Extract embedded archive
-    `$archiveData = "$base64Archive"
-    `$archiveBytes = [Convert]::FromBase64String(`$archiveData)
-    `$archivePath = "`$tempDir\package.7z"
-    [System.IO.File]::WriteAllBytes(`$archivePath, `$archiveBytes)
-    
-    Write-Host "Extracting package contents..." -ForegroundColor Yellow
-    
-    # Extract the package using our embedded 7za
-    Push-Location `$tempDir
-    & ".\7za.exe" x "package.7z" -y
-    `$extractResult = `$LASTEXITCODE
-    Pop-Location
-    
-    if (`$extractResult -ne 0) {
-        Write-Host "ERROR: Failed to extract package" -ForegroundColor Red
-        exit 1
-    }
-    
-    Write-Host "Package extracted successfully!" -ForegroundColor Green
-    
-    # Run the installer
-    `$installScript = "`$tempDir\install.bat"
-    if (Test-Path `$installScript) {
-        Write-Host "Running installation script..." -ForegroundColor Yellow
-        Push-Location `$tempDir
-        & ".\install.bat"
-        `$installResult = `$LASTEXITCODE
-        Pop-Location
-        
-        if (`$installResult -eq 0) {
-            Write-Host "Installation completed successfully!" -ForegroundColor Green
+    if ($result.ExitCode -eq 0) {
+        if (Test-Path "archive.7z") {
+            $archiveSize = [math]::Round((Get-Item "archive.7z").Length / 1024, 1)
+            Write-Host "✅ Created archive.7z ($archiveSize KB)" -ForegroundColor Green
         } else {
-            Write-Host "Installation completed with warnings" -ForegroundColor Yellow
+            throw "archive.7z was not created despite exit code 0"
         }
     } else {
-        Write-Host "WARNING: install.bat not found in package" -ForegroundColor Yellow
-        Write-Host "Available files:" -ForegroundColor Gray
-        Get-ChildItem `$tempDir | Where-Object { `$_.Name -ne "7za.exe" -and `$_.Name -ne "package.7z" } | ForEach-Object { Write-Host "  - `$(`$_.Name)" -ForegroundColor White }
+        throw "7za.exe failed with exit code $($result.ExitCode)"
+    }
+} catch {
+    Write-Host "❌ Failed to create archive: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Debugging info:" -ForegroundColor Yellow
+    Write-Host "  Working directory: $(Get-Location)"
+    Write-Host "  7za.exe exists: $(Test-Path '.\7za.exe')"
+    if (Test-Path ".\7za.exe") {
+        Write-Host "  7za.exe size: $([math]::Round((Get-Item '.\7za.exe').Length / 1024, 1)) KB"
+    }
+    Read-Host "Press Enter to exit"
+    exit 1
+}
+
+####################
+# STEP 2: Check/Install ps2exe
+####################
+
+Write-Host ""
+Write-Host "STEP 2: Checking ps2exe..." -ForegroundColor Yellow
+
+try {
+    $ps2exeModule = Get-Module -ListAvailable -Name ps2exe
+    if ($ps2exeModule) {
+        Write-Host "✅ ps2exe already available (version: $($ps2exeModule.Version))" -ForegroundColor Green
+    } else {
+        Write-Host "Installing ps2exe module..." -ForegroundColor Yellow
+        
+        Write-Host "  Installing NuGet provider..." -ForegroundColor Gray
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+        
+        Write-Host "  Setting PSGallery as trusted..." -ForegroundColor Gray
+        Set-PSRepository -Name 'PSGallery' -InstallationPolicy Trusted
+        
+        Write-Host "  Installing ps2exe module..." -ForegroundColor Gray
+        Install-Module ps2exe -Scope CurrentUser -Force -AllowClobber
+        
+        Write-Host "✅ ps2exe installed successfully" -ForegroundColor Green
+    }
+} catch {
+    Write-Host "❌ Failed to install ps2exe: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  You can manually install with: Install-Module ps2exe -Scope CurrentUser -Force" -ForegroundColor Yellow
+    Read-Host "Press Enter to exit"
+    exit 1
+}
+
+####################
+# STEP 3: Create PowerShell Installer
+####################
+
+Write-Host ""
+Write-Host "STEP 3: Creating PowerShell installer..." -ForegroundColor Yellow
+
+try {
+    Write-Host "Reading archive.7z..." -ForegroundColor Gray
+    $archiveBytes = [System.IO.File]::ReadAllBytes("archive.7z")
+    $base64Archive = [Convert]::ToBase64String($archiveBytes)
+    
+    Write-Host "Reading 7za.exe..." -ForegroundColor Gray
+    $7zaBytes = [System.IO.File]::ReadAllBytes("7za.exe")
+    $base647za = [Convert]::ToBase64String($7zaBytes)
+    
+    $archiveKB = [math]::Round($archiveBytes.Length / 1024, 1)
+    $7zaKB = [math]::Round($7zaBytes.Length / 1024, 1)
+    $base64SizeKB = [math]::Round(($base64Archive.Length + $base647za.Length) / 1024, 1)
+    
+    Write-Host "  Archive: $archiveKB KB -> Base64: $([math]::Round($base64Archive.Length / 1024, 1)) KB" -ForegroundColor Gray
+    Write-Host "  7za.exe: $7zaKB KB -> Base64: $([math]::Round($base647za.Length / 1024, 1)) KB" -ForegroundColor Gray
+    Write-Host "  Total embedded data: $base64SizeKB KB" -ForegroundColor Cyan
+    
+    # Create installer content (use the balanced version from previous artifact)
+    $installerContent = @"
+# file-utils Self-Extracting Installer v0.3.0
+# Generated by make_installer.ps1
+
+# Your balanced installer content here...
+# (This is where the full installer script would go)
+Write-Host "This is a test installer script"
+Write-Host "Archive size: $archiveKB KB"
+Write-Host "7za.exe size: $7zaKB KB"
+Read-Host "Press Enter to exit test installer"
+"@
+
+    Write-Host "Writing file-utils_installer.ps1..." -ForegroundColor Gray
+    $installerContent | Out-File -FilePath "file-utils_installer.ps1" -Encoding UTF8
+    
+    if (Test-Path "file-utils_installer.ps1") {
+        $ps1Size = [math]::Round((Get-Item "file-utils_installer.ps1").Length / 1024, 1)
+        Write-Host "✅ Created file-utils_installer.ps1 ($ps1Size KB)" -ForegroundColor Green
+    } else {
+        throw "file-utils_installer.ps1 was not created"
     }
     
 } catch {
-    Write-Host "Installation failed: `$(`$_.Exception.Message)" -ForegroundColor Red
-    Write-Host "Stack trace: `$(`$_.ScriptStackTrace)" -ForegroundColor Gray
+    Write-Host "❌ Failed to create PowerShell installer: $($_.Exception.Message)" -ForegroundColor Red
+    Read-Host "Press Enter to exit"
     exit 1
-} finally {
-    # Clean up temp directory
-    Write-Host "Cleaning up temporary files..." -ForegroundColor Gray
-    if (Test-Path `$tempDir) {
-        Remove-Item `$tempDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+####################
+# STEP 4: Convert to EXE
+####################
+
+Write-Host ""
+Write-Host "STEP 4: Converting PowerShell to EXE..." -ForegroundColor Yellow
+
+try {
+    Write-Host "Importing ps2exe module..." -ForegroundColor Gray
+    Import-Module ps2exe -Force
+    
+    # Check for icon
+    $iconExists = Test-Path "file-utils.ico"
+    Write-Host "Icon file (file-utils.ico) exists: $iconExists" -ForegroundColor Gray
+    
+    if ($iconExists) {
+        $iconSize = [math]::Round((Get-Item "file-utils.ico").Length / 1024, 1)
+        Write-Host "Icon size: $iconSize KB" -ForegroundColor Gray
+    }
+    
+    # Clean up old EXE
+    if (Test-Path "file-utils_installer.exe") {
+        Write-Host "Removing existing EXE..." -ForegroundColor Gray
+        Remove-Item "file-utils_installer.exe" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+    }
+    
+    Write-Host "Running ps2exe conversion..." -ForegroundColor Gray
+    
+    if ($iconExists) {
+        Write-Host "ps2exe command: ps2exe -inputFile file-utils_installer.ps1 -outputFile file-utils_installer.exe -iconFile file-utils.ico -title 'file-utils Installer' ..." -ForegroundColor Gray
+        
+        ps2exe `
+            -inputFile "file-utils_installer.ps1" `
+            -outputFile "file-utils_installer.exe" `
+            -iconFile "file-utils.ico" `
+            -title "file-utils Installer" `
+            -description "Quantum-Enhanced File Security Tool Installer" `
+            -company "whispr.dev" `
+            -version "0.3.0" `
+            -copyright "Copyright 2024 whispr.dev" `
+            -product "file-utils" `
+            -noConsole `
+            -requireAdmin `
+            -verbose
+    } else {
+        Write-Host "ps2exe command: ps2exe -inputFile file-utils_installer.ps1 -outputFile file-utils_installer.exe -title 'file-utils Installer' ..." -ForegroundColor Gray
+        
+        ps2exe `
+            -inputFile "file-utils_installer.ps1" `
+            -outputFile "file-utils_installer.exe" `
+            -title "file-utils Installer" `
+            -description "Quantum-Enhanced File Security Tool Installer" `
+            -company "whispr.dev" `
+            -version "0.3.0" `
+            -copyright "Copyright 2024 whispr.dev" `
+            -product "file-utils" `
+            -noConsole `
+            -requireAdmin `
+            -verbose
+    }
+    
+    Start-Sleep -Seconds 2
+    
+    if (Test-Path "file-utils_installer.exe") {
+        $exeSize = [math]::Round((Get-Item "file-utils_installer.exe").Length / 1024 / 1024, 2)
+        Write-Host "✅ Created file-utils_installer.exe ($exeSize MB)" -ForegroundColor Green
+    } else {
+        Write-Host "⚠️  ps2exe completed but EXE not found" -ForegroundColor Yellow
+    }
+    
+} catch {
+    Write-Host "❌ ps2exe conversion failed: $($_.Exception.Message)" -ForegroundColor Red
+    
+    if (Test-Path "file-utils_installer.exe") {
+        $exeSize = [math]::Round((Get-Item "file-utils_installer.exe").Length / 1024 / 1024, 2)
+        Write-Host "BUT EXE was created anyway ($exeSize MB)" -ForegroundColor Green
+    } else {
+        Write-Host "Creating batch wrapper as fallback..." -ForegroundColor Yellow
+        
+        $batchWrapper = @"
+@echo off
+title file-utils Installer
+cd /d "%~dp0"
+echo Starting file-utils installer...
+powershell -ExecutionPolicy Bypass -WindowStyle Normal -File "file-utils_installer.ps1"
+pause
+"@
+        
+        $batchWrapper | Out-File -FilePath "file-utils_installer.bat" -Encoding ASCII
+        Write-Host "✅ Created batch wrapper: file-utils_installer.bat" -ForegroundColor Green
+    }
+}
+
+####################
+# FINAL RESULTS
+####################
+
+Write-Host ""
+Write-Host "=== FINAL RESULTS ===" -ForegroundColor Cyan
+Write-Host ""
+
+$outputFiles = @("file-utils_installer.exe", "file-utils_installer.ps1", "file-utils_installer.bat", "archive.7z")
+foreach ($file in $outputFiles) {
+    if (Test-Path $file) {
+        $size = Get-Item $file | ForEach-Object { 
+            if ($_.Length -gt 1MB) { 
+                "$([math]::Round($_.Length / 1MB, 2)) MB" 
+            } else { 
+                "$([math]::Round($_.Length / 1KB, 1)) KB" 
+            }
+        }
+        Write-Host "✅ $file ($size)" -ForegroundColor Green
+    } else {
+        Write-Host "❌ $file (not found)" -ForegroundColor Red
     }
 }
 
 Write-Host ""
-Write-Host "=================================================================" -ForegroundColor Green
-Write-Host "                 Installation Complete!                        " -ForegroundColor Green  
-Write-Host "=================================================================" -ForegroundColor Green
+Write-Host "Build process complete!" -ForegroundColor Green
 Write-Host ""
-Write-Host "You can now use: file-utils --help" -ForegroundColor Cyan
-Write-Host ""
-Read-Host "Press Enter to exit"
-"@
-
-# Save the truly self-extracting installer
-$installerContent | Out-File -FilePath "file-utils_installer.ps1" -Encoding UTF8
-
-# Create batch runner
-$batchContent = @"
-@echo off
-title file-utils Installer
-echo.
-echo ===============================================================
-echo                    file-utils v0.3.0
-echo              Quantum-Enhanced File Security
-echo                     by whispr.dev
-echo ===============================================================
-echo.
-echo Starting PowerShell installer...
-echo.
-powershell -ExecutionPolicy Bypass -File "file-utils_installer.ps1"
-if errorlevel 1 (
-    echo.
-    echo Installation failed!
-    pause
-) else (
-    echo.
-    echo Installation successful!
-    pause
-)
-"@
-
-$batchContent | Out-File -FilePath "file-utils_installer.bat" -Encoding ASCII
-
-# Show results
-$installerSize = (Get-Item "file-utils_installer.ps1").Length
-$installerMB = [math]::Round($installerSize / 1024 / 1024, 2)
-
-Write-Host ""
-Write-Host "=================================================================" -ForegroundColor Green
-Write-Host "                        SUCCESS!                               " -ForegroundColor Green
-Write-Host "=================================================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "Created TRULY self-extracting installer:" -ForegroundColor Cyan
-Write-Host "  file-utils_installer.ps1 ($installerMB MB)" -ForegroundColor White
-Write-Host "  file-utils_installer.bat (double-click version)" -ForegroundColor White
-Write-Host ""
-Write-Host "This installer contains:" -ForegroundColor Yellow
-Write-Host "  - Your file-utils package" -ForegroundColor White
-Write-Host "  - Embedded 7za.exe extractor" -ForegroundColor White
-Write-Host "  - Installation script" -ForegroundColor White
-Write-Host "  - NO EXTERNAL DEPENDENCIES!" -ForegroundColor Green
-Write-Host ""
-Write-Host "Test with: .\file-utils_installer.ps1" -ForegroundColor Cyan
-Write-Host "Or double-click: file-utils_installer.bat" -ForegroundColor Cyan
-
-
-######################
-#  step 3. .ps1 -> .exe
-######################
-
-# Install ps2exe
-Install-Module ps2exe -Scope CurrentUser -Force
-
-# Convert to EXE (one line)
-ps2exe -inputFile "file-utils_installer.ps1" -outputFile "file-utils_installer.exe" -iconFile "file-utils.ico" -title "file-utils Installer" -description "Quantum-Enhanced File Security Tool Installer" -company "whispr.dev" -version "0.3.0" -copyright "Copyright © 2024 whispr.dev" -product "file-utils" -noConsole -requireAdmin
-
-# Test it
-.\file-utils-installer.exe
-
-
-######################
-#  done! congratz.
-######################
+Write-Host "To test: .\file-utils_installer.exe" -ForegroundColor Yellow

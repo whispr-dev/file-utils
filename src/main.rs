@@ -12,7 +12,7 @@ use crate::crypto::{encrypt_file, decrypt_file, CryptoMode};
 use crate::secure_delete::secure_delete;
 
 fn main() -> Result<()> {
-    let matches = Command::new("wofl_obs-defuscrypt")
+    let matches = Command::new("file-utils-i")
         .about("Encrypt, decrypt, or securely delete files")
         .arg(Arg::new("secure")
             .short('s')
@@ -87,7 +87,7 @@ fn main() -> Result<()> {
     // CASE: Standalone secure delete mode
     if let Some(path) = matches.get_one::<String>("secure") {
         secure_delete(Path::new(path))?;
-        println!("✅ Securely deleted: {}", path);
+        println!("Securely deleted: {}", path);
         return Ok(());
     }
 
@@ -119,7 +119,7 @@ fn main() -> Result<()> {
             // Securely delete original if requested
             if encrypt_matches.get_flag("secure") {
                 secure_delete(source_path)?;
-                println!("✅ Original file securely deleted");
+                println!("Original file securely deleted");
             }
         }
         Some(("decrypt", decrypt_matches)) => {
@@ -152,14 +152,14 @@ fn main() -> Result<()> {
             // Securely delete original if requested
             if decrypt_matches.get_flag("secure") {
                 secure_delete(source_path)?;
-                println!("✅ Original file securely deleted");
+                println!("Original file securely deleted");
             }
         }
         _ => {
             println!("Usage:");
-            println!("  Encrypt: wofl_obs-defuscrypt.exe encrypt <path> [-o output] [-k key] [-m mode] [-s]");
-            println!("  Decrypt: wofl_obs-defuscrypt.exe decrypt <path> [-o output] [-k key] [-m mode] [-s]");
-            println!("  Shred:   wofl_obs-defuscrypt.exe -s <path>");
+            println!("  Encrypt: file-utils-i.exe encrypt <path> [-o output] [-k key] [-m mode] [-s]");
+            println!("  Decrypt: file-utils-i.exe decrypt <path> [-o output] [-k key] [-m mode] [-s]");
+            println!("  Shred:   file-utils-i.exe -s <path>");
             println!("");
             println!("Modes: aes (default), quantum");
             println!("If no key is provided, you'll be prompted to enter one.");

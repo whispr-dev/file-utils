@@ -130,6 +130,12 @@ fn terminate_lock_owners(path: &Path) -> Result<()> {
     // 2. Use OpenProcess + TerminateProcess
     // 3. Handle privileges (need SeDebugPrivilege)
     
+
+#####################
+# PROCWOLF HERE
+#####################
+
+
     eprintln!("Warning: Process termination not implemented. Manual intervention may be required.");
     
     Ok(())

@@ -1,11 +1,11 @@
 @echo off
-:: uninstall.bat - Professional uninstaller for file-utils
+:: uninstall.bat - Professional uninstaller for file-utils-i
 
-title file-utils Uninstaller
+title file-utils-i Uninstaller
 
 echo.
 echo ╔══════════════════════════════════════════════════════════════╗
-echo ║                    file-utils v0.3.0                        ║
+echo ║                    file-utils-i v0.3.0                        ║
 echo ║              Quantum-Enhanced File Security                  ║
 echo ║                     UNINSTALLER                              ║
 echo ║                   by whispr.dev                              ║
@@ -23,9 +23,9 @@ if %errorLevel% == 0 (
 )
 
 :: Confirmation prompt
-echo This will completely remove file-utils from your system.
+echo This will completely remove file-utils-i from your system.
 echo.
-set /p "confirm=Are you sure you want to uninstall file-utils? (Y/N): "
+set /p "confirm=Are you sure you want to uninstall file-utils-i? (Y/N): "
 if /i not "%confirm%"=="Y" (
     echo.
     echo [→] Uninstallation cancelled by user.
@@ -33,19 +33,19 @@ if /i not "%confirm%"=="Y" (
 )
 
 echo.
-echo [→] Starting file-utils removal...
+echo [→] Starting file-utils-i removal...
 
 :: Define installation directory
-set INSTALL_DIR=%ProgramFiles%\whispr.dev\file-utils
+set INSTALL_DIR=%ProgramFiles%\whispr.dev\file-utils-i
 
 :: Remove desktop shortcut
 echo [→] Removing desktop shortcuts...
-if exist "%PUBLIC%\Desktop\file-utils.lnk" (
-    del "%PUBLIC%\Desktop\file-utils.lnk" >nul 2>&1
+if exist "%PUBLIC%\Desktop\file-utils-i.lnk" (
+    del "%PUBLIC%\Desktop\file-utils-i.lnk" >nul 2>&1
     echo [✓] Removed public desktop shortcut
 )
-if exist "%USERPROFILE%\Desktop\file-utils.lnk" (
-    del "%USERPROFILE%\Desktop\file-utils.lnk" >nul 2>&1
+if exist "%USERPROFILE%\Desktop\file-utils-i.lnk" (
+    del "%USERPROFILE%\Desktop\file-utils-i.lnk" >nul 2>&1
     echo [✓] Removed user desktop shortcut
 )
 
@@ -100,8 +100,8 @@ if defined USERPATH (
 
 :: Remove registry entries (if any were created)
 echo [→] Cleaning registry entries...
-reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\file-utils" /f >nul 2>&1
-reg delete "HKCU\SOFTWARE\whispr.dev\file-utils" /f >nul 2>&1
+reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\file-utils-i" /f >nul 2>&1
+reg delete "HKCU\SOFTWARE\whispr.dev\file-utils-i" /f >nul 2>&1
 echo [✓] Registry entries cleaned
 
 :: Secure delete installation files
@@ -112,11 +112,11 @@ if exist "%INSTALL_DIR%" (
     :: First try to remove normally
     rmdir /s /q "%INSTALL_DIR%" >nul 2>&1
     
-    :: If it still exists, try to force remove with file-utils itself (if available)
+    :: If it still exists, try to force remove with file-utils-i itself (if available)
     if exist "%INSTALL_DIR%" (
         echo [→] Some files are stubborn, attempting secure deletion...
         if exist "%INSTALL_DIR%\file-utils.exe" (
-            "%INSTALL_DIR%\file-utils.exe" -s "%INSTALL_DIR%\*" >nul 2>&1
+            "%INSTALL_DIR%\file-utils-i.exe" -s "%INSTALL_DIR%\*" >nul 2>&1
         )
         :: Try removing directory again
         rmdir /s /q "%INSTALL_DIR%" >nul 2>&1
@@ -142,17 +142,17 @@ if exist "%PARENT_DIR%" (
 
 :: Clean up temporary files
 echo [→] Cleaning temporary files...
-if exist "%TEMP%\file-utils*" (
+if exist "%TEMP%\file-utils-i*" (
     rmdir /s /q "%TEMP%\file-utils*" >nul 2>&1
     echo [✓] Cleaned temporary files
 )
 
 :: Remove application data (user config files, if any)
 echo [→] Cleaning user data...
-if exist "%APPDATA%\file-utils" (
+if exist "%APPDATA%\file-utils-i" (
     set /p "remove_data=Remove user configuration files? (Y/N): "
     if /i "!remove_data!"=="Y" (
-        rmdir /s /q "%APPDATA%\file-utils" >nul 2>&1
+        rmdir /s /q "%APPDATA%\file-utils-i" >nul 2>&1
         echo [✓] Removed user configuration files
     ) else (
         echo [→] Kept user configuration files
@@ -169,12 +169,12 @@ echo ╔════════════════════════
 echo ║                 Uninstallation Complete!                    ║
 echo ╚══════════════════════════════════════════════════════════════╝
 echo.
-echo [✓] file-utils has been removed from your system
+echo [✓] file-utils-i has been removed from your system
 echo [✓] Shortcuts and PATH entries cleaned
 echo [✓] Registry entries removed
 echo [✓] Installation files deleted
 echo.
-echo Thank you for using file-utils by whispr.dev!
+echo Thank you for using file-utils-i by whispr.dev!
 echo.
 
 :end
