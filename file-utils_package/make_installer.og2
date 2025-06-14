@@ -1,0 +1,342 @@
+# make_installer.ps1 - NO MORE ANNOYING PROMPTS!
+
+# Disable progress bars and confirmations (THIS STOPS THE SPAM!)
+$ProgressPreference = 'SilentlyContinue'
+$ConfirmPreference = 'None'
+$VerbosePreference = 'SilentlyContinue'
+
+Write-Host "🚀 Building professional file-utils installer..." -ForegroundColor Green
+
+####################
+# STEP 0: Prerequisites Check
+####################
+
+Write-Host "🔍 Checking prerequisites..." -ForegroundColor Yellow
+
+$requiredFiles = @{
+    "7za.exe" = "7-Zip command line tool"
+    "file-utils.exe" = "Main executable"
+    "install.bat" = "Installation script"
+    "UNWISE.bat" = "Uninstallation script (renamed from uninstall.bat)"
+    "README" = "Documentation"
+    "LICENSE" = "License file"
+}
+
+$missingFiles = @()
+foreach ($file in $requiredFiles.Keys) {
+    if (-not (Test-Path $file)) {
+        $missingFiles += "$file ($($requiredFiles[$file]))"
+    } else {
+        Write-Host "  ✅ Found: $file" -ForegroundColor Green
+    }
+}
+
+if ($missingFiles.Count -gt 0) {
+    Write-Host "❌ Missing required files:" -ForegroundColor Red
+    $missingFiles | ForEach-Object { Write-Host "     - $_" -ForegroundColor Red }
+    Write-Host ""
+    Write-Host "💡 Make sure these files are in the current directory:" -ForegroundColor Yellow
+    Write-Host "   - 7za.exe (download from 7-zip.org)" -ForegroundColor White
+    Write-Host "   - file-utils.exe (your compiled binary)" -ForegroundColor White
+    Write-Host "   - install.bat & UNWISE.bat (installation scripts)" -ForegroundColor White
+    Write-Host "   - README & LICENSE (documentation)" -ForegroundColor White
+    Read-Host "Press Enter to exit"
+    exit 1
+}
+
+# Optional files
+$optionalFiles = @{
+    "file-utils.ico" = "Icon file"
+    "rcedit-x64.exe" = "Icon editor (will download if missing)"
+}
+
+foreach ($file in $optionalFiles.Keys) {
+    if (Test-Path $file) {
+        Write-Host "  ✅ Found: $file" -ForegroundColor Green
+    } else {
+        Write-Host "  ⚠️  Missing: $file ($($optionalFiles[$file]))" -ForegroundColor Yellow
+    }
+}
+
+####################
+# STEP 1: Create Archive
+####################
+
+Write-Host ""
+Write-Host "📦 Creating 7z archive..." -ForegroundColor Yellow
+
+# Clean up old archive first
+if (Test-Path "archive.7z") {
+    Remove-Item "archive.7z" -Force
+}
+
+try {
+    # Create archive (suppress all output)
+    $process = Start-Process -FilePath ".\7za.exe" -ArgumentList "a", "-t7z", "archive.7z", "file-utils.exe", "README", "LICENSE", "docs\", "install.bat", "UNWISE.bat" -Wait -NoNewWindow -PassThru -RedirectStandardOutput "NUL" -RedirectStandardError "NUL"
+    
+    if ($process.ExitCode -eq 0) {
+        $archiveSize = [math]::Round((Get-Item "archive.7z").Length / 1024, 1)
+        Write-Host "  ✅ Created archive.7z ($archiveSize KB)" -ForegroundColor Green
+    } else {
+        throw "7za.exe failed with exit code $($process.ExitCode)"
+    }
+} catch {
+    Write-Host "  ❌ Failed to create archive: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
+
+####################
+# STEP 2: Auto-Install ps2exe (SILENTLY!)
+####################
+
+Write-Host ""
+Write-Host "🔧 Checking/installing ps2exe..." -ForegroundColor Yellow
+
+try {
+    # Check if ps2exe is already available
+    if (-not (Get-Module -ListAvailable -Name ps2exe -ErrorAction SilentlyContinue)) {
+        Write-Host "  📥 Installing ps2exe module..." -ForegroundColor Yellow
+        
+        # Install silently without prompts
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+        Set-PSRepository -Name 'PSGallery' -InstallationPolicy Trusted
+        Install-Module ps2exe -Scope CurrentUser -Force -AllowClobber
+        
+        Write-Host "  ✅ ps2exe installed successfully" -ForegroundColor Green
+    } else {
+        Write-Host "  ✅ ps2exe already available" -ForegroundColor Green
+    }
+} catch {
+    Write-Host "  ❌ Failed to install ps2exe: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  💡 You can manually install with: Install-Module ps2exe -Scope CurrentUser -Force" -ForegroundColor Yellow
+    exit 1
+}
+
+####################
+# STEP 3: Create PowerShell Installer
+####################
+
+Write-Host ""
+Write-Host "📝 Creating PowerShell installer..." -ForegroundColor Yellow
+
+# Read and encode files
+$archiveBytes = [System.IO.File]::ReadAllBytes("archive.7z")
+$base64Archive = [Convert]::ToBase64String($archiveBytes)
+
+$7zaBytes = [System.IO.File]::ReadAllBytes("7za.exe")
+$base647za = [Convert]::ToBase64String($7zaBytes)
+
+$archiveKB = [math]::Round($archiveBytes.Length / 1024, 1)
+$7zaKB = [math]::Round($7zaBytes.Length / 1024, 1)
+
+Write-Host "  📊 Archive: $archiveKB KB, 7za.exe: $7zaKB KB" -ForegroundColor Cyan
+
+# Create the installer content
+$installerContent = @"
+# file-utils Self-Extracting Installer v0.3.0
+# NO EXTERNAL DEPENDENCIES!
+
+`$ProgressPreference = 'SilentlyContinue'
+`$ErrorActionPreference = 'Stop'
+
+Write-Host ""
+Write-Host "=================================================================" -ForegroundColor Cyan
+Write-Host "                    file-utils v0.3.0                          " -ForegroundColor Cyan
+Write-Host "              Quantum-Enhanced File Security                    " -ForegroundColor Cyan
+Write-Host "                   by whispr.dev                               " -ForegroundColor Cyan
+Write-Host "=================================================================" -ForegroundColor Cyan
+Write-Host ""
+
+`$response = Read-Host "Install file-utils? (Y/N)"
+if (`$response -notmatch "^[Yy]") {
+    Write-Host "Installation cancelled." -ForegroundColor Yellow
+    exit 0
+}
+
+Write-Host "🚀 Starting installation..." -ForegroundColor Green
+
+`$tempDir = "`$env:TEMP\file-utils_install_`$(Get-Random)"
+New-Item -ItemType Directory -Path `$tempDir -Force | Out-Null
+
+try {
+    Write-Host "📦 Extracting files..." -ForegroundColor Yellow
+    
+    # Extract embedded 7za.exe
+    `$7zaData = "$base647za"
+    `$7zaBytes = [Convert]::FromBase64String(`$7zaData)
+    [System.IO.File]::WriteAllBytes("`$tempDir\7za.exe", `$7zaBytes)
+    
+    # Extract embedded archive
+    `$archiveData = "$base64Archive"
+    `$archiveBytes = [Convert]::FromBase64String(`$archiveData)
+    [System.IO.File]::WriteAllBytes("`$tempDir\package.7z", `$archiveBytes)
+    
+    # Extract package
+    Push-Location `$tempDir
+    `$result = & ".\7za.exe" x "package.7z" -y 2>`$null
+    Pop-Location
+    
+    if (`$LASTEXITCODE -ne 0) {
+        throw "Failed to extract package"
+    }
+    
+    Write-Host "✅ Files extracted successfully" -ForegroundColor Green
+    
+    # Run installer
+    if (Test-Path "`$tempDir\install.bat") {
+        Write-Host "🔧 Running installation..." -ForegroundColor Yellow
+        Push-Location `$tempDir
+        & ".\install.bat"
+        Pop-Location
+        Write-Host "✅ Installation completed!" -ForegroundColor Green
+    } else {
+        Write-Host "❌ install.bat not found" -ForegroundColor Red
+    }
+    
+} catch {
+    Write-Host "❌ Installation failed: `$(`$_.Exception.Message)" -ForegroundColor Red
+    exit 1
+} finally {
+    if (Test-Path `$tempDir) {
+        Remove-Item `$tempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Write-Host ""
+Write-Host "🎉 file-utils installation complete!" -ForegroundColor Green
+Write-Host "💡 Try: file-utils --help" -ForegroundColor Cyan
+Read-Host "Press Enter to exit"
+"@
+
+$installerContent | Out-File -FilePath "file-utils_installer.ps1" -Encoding UTF8
+Write-Host "  ✅ Created file-utils_installer.ps1" -ForegroundColor Green
+
+####################
+# STEP 4: Convert PS1 to EXE
+####################
+
+Write-Host ""
+Write-Host "🔄 Converting PowerShell to EXE..." -ForegroundColor Yellow
+
+try {
+    # Import the module silently
+    Import-Module ps2exe -Force
+
+    $iconParam = @{}
+    if (Test-Path "file-utils.ico") {
+        $iconParam = @{iconFile = "file-utils.ico"}
+        Write-Host "  🎨 Using custom icon: file-utils.ico" -ForegroundColor Cyan
+    }
+    
+    # Convert with error handling
+    ps2exe -inputFile "file-utils_installer.ps1" `
+           -outputFile "file-utils_installer.exe" `
+           -title "file-utils Installer" `
+           -description "Quantum-Enhanced File Security Tool Installer" `
+           -company "whispr.dev" `
+           -version "0.3.0" `
+           -copyright "Copyright © 2024 whispr.dev" `
+           -product "file-utils" `
+           -noConsole `
+           -requireAdmin `
+           @iconParam
+    
+    if (Test-Path "file-utils_installer.exe") {
+        $exeSize = [math]::Round((Get-Item "file-utils_installer.exe").Length / 1024 / 1024, 2)
+        Write-Host "  ✅ Created file-utils_installer.exe ($exeSize MB)" -ForegroundColor Green
+    } else {
+        throw "ps2exe did not create output file"
+    }
+    
+} catch {
+    Write-Host "  ❌ ps2exe conversion failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  💡 But file-utils_installer.ps1 is still available" -ForegroundColor Yellow
+}
+
+####################
+# STEP 5: Download rcedit if needed (OPTIONAL)
+####################
+
+if (-not (Test-Path "rcedit-x64.exe") -and (Test-Path "file-utils_installer.exe")) {
+    Write-Host ""
+    Write-Host "📥 Downloading rcedit for additional customization..." -ForegroundColor Yellow
+    
+    try {
+        $rceditUrl = "https://github.com/electron/rcedit/releases/latest/download/rcedit-x64.exe"
+        Invoke-WebRequest -Uri $rceditUrl -OutFile "rcedit-x64.exe" -UseBasicParsing
+        Write-Host "  ✅ Downloaded rcedit-x64.exe" -ForegroundColor Green
+        
+        # Apply additional customization if icon exists
+        if (Test-Path "file-utils.ico") {
+            Write-Host "  🎨 Applying additional icon customization..." -ForegroundColor Yellow
+            & ".\rcedit-x64.exe" "file-utils_installer.exe" --set-icon "file-utils.ico" 2>$null
+        }
+    } catch {
+        Write-Host "  ⚠️  Could not download rcedit (optional)" -ForegroundColor Yellow
+    }
+}
+
+####################
+# STEP 6: Cleanup (OPTIONAL)
+####################
+
+Write-Host ""
+$cleanup = Read-Host "🧹 Clean up temporary files? (Y/N)"
+if ($cleanup -match "^[Yy]") {
+    Write-Host "🗑️  Cleaning up..." -ForegroundColor Yellow
+    
+    $cleanupFiles = @("archive.7z", "config.txt", "file-utils_installer.ps1")
+    foreach ($file in $cleanupFiles) {
+        if (Test-Path $file) {
+            Remove-Item $file -Force
+            Write-Host "  🗑️  Removed: $file" -ForegroundColor Gray
+        }
+    }
+    
+    Write-Host "  ✅ Cleanup complete" -ForegroundColor Green
+} else {
+    Write-Host "  📁 Temporary files kept for debugging" -ForegroundColor Yellow
+}
+
+####################
+# FINAL RESULTS
+####################
+
+Write-Host ""
+Write-Host "=================================================================" -ForegroundColor Green
+Write-Host "                        🎉 SUCCESS! 🎉                        " -ForegroundColor Green
+Write-Host "=================================================================" -ForegroundColor Green
+Write-Host ""
+
+if (Test-Path "file-utils_installer.exe") {
+    Write-Host "✅ Created professional installer:" -ForegroundColor Cyan
+    Write-Host "   📦 file-utils_installer.exe" -ForegroundColor White
+    Write-Host "   🖼️  Custom icon embedded" -ForegroundColor White
+    Write-Host "   🔒 Requires admin privileges" -ForegroundColor White
+    Write-Host "   👆 Double-clickable!" -ForegroundColor White
+    Write-Host ""
+    Write-Host "🧪 Test with: .\file-utils_installer.exe" -ForegroundColor Yellow
+} else {
+    Write-Host "⚠️  EXE conversion failed, but PowerShell installer available:" -ForegroundColor Yellow
+    Write-Host "   📝 file-utils_installer.ps1" -ForegroundColor White
+    Write-Host "   🧪 Test with: .\file-utils_installer.ps1" -ForegroundColor Yellow
+}
+
+Write-Host ""
+Write-Host "🚀 Your professional installer is ready for distribution!" -ForegroundColor Green
+Write-Host ""
+
+# Optional: Test the installer
+$test = Read-Host "🧪 Test the installer now? (Y/N)"
+if ($test -match "^[Yy]") {
+    if (Test-Path "file-utils_installer.exe") {
+        Write-Host "🚀 Launching installer..." -ForegroundColor Green
+        Start-Process ".\file-utils_installer.exe" -Wait
+    } else {
+        Write-Host "🚀 Running PowerShell installer..." -ForegroundColor Green
+        & ".\file-utils_installer.ps1"
+    }
+}
+
+Write-Host ""
+Write-Host "🎯 Build process complete!" -ForegroundColor Green

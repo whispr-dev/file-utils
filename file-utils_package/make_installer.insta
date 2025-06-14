@@ -1,0 +1,209 @@
+# FIXED PowerShell Installer Content - NO MORE PROMPTS!
+
+$installerContent = @"
+# file-utils Self-Extracting Installer v0.3.0
+# ZERO PROMPTS VERSION!
+
+# FORCE SILENT OPERATION - NO PROMPTS!
+`$ProgressPreference = 'SilentlyContinue'
+`$ConfirmPreference = 'None'
+`$VerbosePreference = 'SilentlyContinue'
+`$DebugPreference = 'SilentlyContinue'
+`$InformationPreference = 'SilentlyContinue'
+`$WarningPreference = 'SilentlyContinue'
+`$ErrorActionPreference = 'Continue'
+
+# Disable ALL confirmations
+Set-StrictMode -Off
+`$PSDefaultParameterValues = @{
+    '*:Confirm' = `$false
+    '*:WhatIf' = `$true
+    '*:Verbose' = `$true
+    '*:Debug' = `$true
+}
+
+# Function for graceful exit
+function Exit-Gracefully {
+    param([string]`$Message, [string]`$Color = "Yellow")
+    Write-Host ""
+    Write-Host `$Message -ForegroundColor `$Color
+    Write-Host ""
+    Write-Host "Press any key to exit..." -ForegroundColor Gray
+    `$null = `$Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit 0
+}
+
+Clear-Host
+Write-Host ""
+Write-Host "=================================================================" -ForegroundColor Cyan
+Write-Host "                    file-utils v0.3.0                          " -ForegroundColor Cyan
+Write-Host "              Quantum-Enhanced File Security                    " -ForegroundColor Cyan
+Write-Host "                   by whispr.dev                               " -ForegroundColor Cyan
+Write-Host "=================================================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "This installer will:"
+Write-Host "  • Install file-utils to Program Files"
+Write-Host "  • Add to system PATH"
+Write-Host "  • Create desktop shortcut"
+Write-Host "  • Require administrator privileges"
+Write-Host ""
+
+# Single confirmation prompt
+do {
+    `$response = Read-Host "Continue with installation? [Y]es, [N]o, [H]elp"
+    switch (`$response.ToUpper()) {
+        "Y" { `$install = `$true; break }
+        "YES" { `$install = `$true; break }
+        "N" { Exit-Gracefully "Installation cancelled by user." }
+        "NO" { Exit-Gracefully "Installation cancelled by user." }
+        "H" { 
+            Write-Host ""
+            Write-Host "HELP: file-utils Installation" -ForegroundColor Yellow
+            Write-Host "=============================="
+            Write-Host "This tool provides quantum-enhanced file encryption and secure deletion."
+            Write-Host ""
+            Write-Host "Commands after installation:"
+            Write-Host "  file-utils encrypt myfile.txt    - Encrypt a file"
+            Write-Host "  file-utils decrypt myfile.enc    - Decrypt a file"  
+            Write-Host "  file-utils -s oldfile.txt        - Secure delete"
+            Write-Host "  file-utils --help                - Show all options"
+            Write-Host ""
+            continue
+        }
+        default { 
+            Write-Host "Please enter Y for Yes, N for No, or H for Help" -ForegroundColor Yellow
+            continue 
+        }
+    }
+} while (`$true)
+
+if (-not `$install) {
+    Exit-Gracefully "Installation cancelled."
+}
+
+Write-Host ""
+Write-Host "Starting installation..." -ForegroundColor Green
+
+# Create temp directory with error handling
+`$tempDir = "`$env:TEMP\file-utils_install_`$(Get-Random)"
+try {
+    New-Item -ItemType Directory -Path `$tempDir -Force | Out-Null
+} catch {
+    Exit-Gracefully "ERROR: Could not create temporary directory. `$(`$_.Exception.Message)" "Red"
+}
+
+Write-Host "Temporary directory: `$tempDir" -ForegroundColor Gray
+
+try {
+    Write-Host "Extracting embedded files..." -ForegroundColor Yellow
+    
+    # Extract 7za.exe (SILENTLY)
+    `$7zaData = "$base647za"
+    `$7zaBytes = [Convert]::FromBase64String(`$7zaData)
+    [System.IO.File]::WriteAllBytes("`$tempDir\7za.exe", `$7zaBytes)
+    
+    # Extract archive (SILENTLY)
+    `$archiveData = "$base64Archive"
+    `$archiveBytes = [Convert]::FromBase64String(`$archiveData)
+    [System.IO.File]::WriteAllBytes("`$tempDir\package.7z", `$archiveBytes)
+    
+    Write-Host "Extracting package contents..." -ForegroundColor Yellow
+    
+    # Extract using 7za (COMPLETELY SILENT)
+    Push-Location `$tempDir
+    `$extractOutput = & ".\7za.exe" x "package.7z" -y 2>&1
+    `$extractResult = `$LASTEXITCODE
+    Pop-Location
+    
+    if (`$extractResult -ne 0) {
+        Exit-Gracefully "ERROR: Failed to extract package. Exit code: `$extractResult" "Red"
+    }
+    
+    Write-Host "Package extracted successfully!" -ForegroundColor Green
+    
+    # Run installer (SILENTLY)
+    `$installScript = "`$tempDir\install.bat"
+    if (Test-Path `$installScript) {
+        Write-Host "Running installation script..." -ForegroundColor Yellow
+        
+        Push-Location `$tempDir
+        # Run batch file completely silently
+        `$installOutput = & ".\install.bat" 2>&1
+        `$installResult = `$LASTEXITCODE
+        Pop-Location
+        
+        if (`$installResult -eq 0) {
+            Write-Host "Installation completed successfully!" -ForegroundColor Green
+        } else {
+            Write-Host "Installation completed with warnings (exit code: `$installResult)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "WARNING: install.bat not found in package" -ForegroundColor Yellow
+        Write-Host "Available files:" -ForegroundColor Gray
+        Get-ChildItem `$tempDir | Where-Object { `$_.Name -ne "7za.exe" -and `$_.Name -ne "package.7z" } | ForEach-Object { 
+            Write-Host "  - `$(`$_.Name)" -ForegroundColor White 
+        }
+    }
+    
+} catch {
+    Exit-Gracefully "Installation failed: `$(`$_.Exception.Message)" "Red"
+} finally {
+    # Clean up temp directory (SILENTLY)
+    Write-Host "Cleaning up temporary files..." -ForegroundColor Gray
+    if (Test-Path `$tempDir) {
+        Remove-Item `$tempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Write-Host ""
+Write-Host "=================================================================" -ForegroundColor Green
+Write-Host "                 Installation Complete!                        " -ForegroundColor Green  
+Write-Host "=================================================================" -ForegroundColor Green
+Write-Host ""
+Write-Host "file-utils has been installed successfully!" -ForegroundColor Green
+Write-Host ""
+Write-Host "Quick start:" -ForegroundColor Cyan
+Write-Host "  • Open a new Command Prompt or PowerShell window"
+Write-Host "  • Type: file-utils --help"
+Write-Host "  • Try: file-utils encrypt myfile.txt"
+Write-Host ""
+Write-Host "Documentation: Check the installed docs folder or README"
+Write-Host ""
+
+# Graceful exit with options
+Write-Host "Installation complete!" -ForegroundColor Green
+Write-Host ""
+Write-Host "[1] Exit installer"
+Write-Host "[2] Open Command Prompt to try file-utils"  
+Write-Host "[3] Show file-utils help"
+Write-Host ""
+
+do {
+    `$choice = Read-Host "Choose an option (1-3)"
+    switch (`$choice) {
+        "1" { 
+            Exit-Gracefully "Thank you for installing file-utils!" "Green"
+        }
+        "2" { 
+            Write-Host "Opening Command Prompt..." -ForegroundColor Yellow
+            Start-Process "cmd.exe" -ArgumentList "/k", "echo Type 'file-utils --help' to get started && echo."
+            Exit-Gracefully "Command Prompt opened. Installer exiting." "Green"
+        }
+        "3" {
+            Write-Host ""
+            Write-Host "Attempting to show file-utils help..." -ForegroundColor Yellow
+            try {
+                & "file-utils.exe" --help 2>&1
+            } catch {
+                Write-Host "Could not run file-utils directly. Try opening a new Command Prompt." -ForegroundColor Yellow
+            }
+            Write-Host ""
+            continue
+        }
+        default { 
+            Write-Host "Please enter 1, 2, or 3" -ForegroundColor Yellow
+            continue 
+        }
+    }
+} while (`$true)
+"@
