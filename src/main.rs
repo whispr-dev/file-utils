@@ -3,6 +3,9 @@ mod crypto;
 mod secure_delete;
 mod file_utils;
 mod ui;
+mod file_operations;
+mod process_hunter;
+mod secure_wipe;
 
 use anyhow::Result;
 use clap::{Arg, ArgAction, Command};
@@ -10,6 +13,7 @@ use std::path::Path;
 
 use crate::crypto::{encrypt_file, decrypt_file, CryptoMode};
 use crate::secure_delete::secure_delete;
+
 
 fn main() -> Result<()> {
     let matches = Command::new("file-utils-i")

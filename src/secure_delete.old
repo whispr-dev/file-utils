@@ -1,0 +1,1274 @@
+use std::io::{Write, Seek};
+use std::path::Path;
+use std::fs::OpenOptions;
+use anyhow::{Context, Result};
+use rand::RngCore;
+use std::collections::HashMap;
+
+#[cfg(windows)]
+use std::ffi::OsStr;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use std::ptr;
+#[cfg(windows)]
+use std::mem;
+
+// Windows-specific constants and types
+#[cfg(windows)]
+const FILE_ATTRIBUTE_READONLY: u32 = 0x00000001;
+#[cfg(windows)]
+const FILE_ATTRIBUTE_HIDDEN: u32 = 0x00000002;
+#[cfg(windows)]
+const FILE_ATTRIBUTE_SYSTEM: u32 = 0x00000004;
+#[cfg(windows)]
+const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x00000004;
+
+// Process and thread access rights
+#[cfg(windows)]
+const PROCESS_TERMINATE: u32 = 0x0001;
+#[cfg(windows)]
+const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+#[cfg(windows)]
+const PROCESS_VM_READ: u32 = 0x0010;
+
+// Snapshot constants
+#[cfg(windows)]
+const TH32CS_SNAPPROCESS: u32 = 0x00000002;
+#[cfg(windows)]
+const TH32CS_SNAPTHREAD: u32 = 0x00000004;
+#[cfg(windows)]
+const TH32CS_SNAPHANDLE: u32 = 0x00000008;
+
+// Thread access rights
+#[cfg(windows)]
+const THREAD_SUSPEND_RESUME: u32 = 0x0002;
+
+// Handle types for query
+#[cfg(windows)]
+const OBJECT_TYPE_FILE: u16 = 28;
+
+#[cfg(windows)]
+#[repr(C)]
+struct ProcessEntry32W {
+    dw_size: u32,
+    cnt_usage: u32,
+    th32_process_id: u32,
+    th32_default_heap_id: usize,
+    th32_module_id: u32,
+    cnt_threads: u32,
+    th32_parent_process_id: u32,
+    pc_pri_class_base: i32,
+    dw_flags: u32,
+    sz_exe_file: [u16; 260], // MAX_PATH
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct ThreadEntry32 {
+    dw_size: u32,
+    cnt_usage: u32,
+    th32_thread_id: u32,
+    th32_owner_process_id: u32,
+    tpri_base: i32,
+    tpri_delta: i32,
+    dw_flags: u32,
+}
+
+#[cfg(windows)]
+type Handle = *mut std::ffi::c_void;
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn SetFileAttributesW(lpFileName: *const u16, dwFileAttributes: u32) -> i32;
+    fn MoveFileExW(
+        lpExistingFileName: *const u16,
+        lpNewFileName: *const u16,
+        dwFlags: u32,
+    ) -> i32;
+    fn GetLastError() -> u32;
+    
+    // Process enumeration and termination
+    fn CreateToolhelp32Snapshot(dwFlags: u32, th32ProcessID: u32) -> Handle;
+    fn Process32FirstW(hSnapshot: Handle, lppe: *mut ProcessEntry32W) -> i32;
+    fn Process32NextW(hSnapshot: Handle, lppe: *mut ProcessEntry32W) -> i32;
+    fn Thread32First(hSnapshot: Handle, lpte: *mut ThreadEntry32) -> i32;
+    fn Thread32Next(hSnapshot: Handle, lpte: *mut ThreadEntry32) -> i32;
+    fn CloseHandle(hObject: Handle) -> i32;
+    
+    // Process operations
+    fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> Handle;
+    fn TerminateProcess(hProcess: Handle, uExitCode: u32) -> i32;
+    fn GetProcessImageFileNameW(hProcess: Handle, lpImageFileName: *mut u16, nSize: u32) -> u32;
+    
+    // Thread operations
+    fn OpenThread(dwDesiredAccess: u32, bInheritHandle: i32, dwThreadId: u32) -> Handle;
+    fn SuspendThread(hThread: Handle) -> u32;
+    fn ResumeThread(hThread: Handle) -> u32;
+    
+    // Handle checking (simplified - real implementation would use NtQuerySystemInformation)
+    fn GetCurrentProcessId() -> u32;
+}
+
+#[cfg(windows)]
+const INVALID_HANDLE_VALUE: Handle = (-1isize) as Handle;
+
+/// Process information structure
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+struct ProcessInfo {
+    pid: u32,
+    name: String,
+    path: Option<String>,
+    parent_pid: u32,
+}
+
+/// Convert a path to Windows wide string format with \\?\ prefix for long paths
+#[cfg(windows)]
+fn path_to_wide_string(path: &Path) -> Vec<u16> {
+    let path_str = if path.is_absolute() {
+        // Add \\?\ prefix for long path support
+        format!("\\\\?\\{}", path.display())
+    } else {
+        // Convert relative path to absolute first
+        match std::env::current_dir() {
+            Ok(current) => {
+                let absolute_path = current.join(path);
+                format!("\\\\?\\{}", absolute_path.display())
+            }
+            Err(_) => path.display().to_string(),
+        }
+    };
+    
+    let wide: Vec<u16> = OsStr::new(&path_str)
+        .encode_wide()
+        .chain(std::iter::once(0)) // Null terminator
+        .collect();
+    
+    wide
+}
+
+/// Convert wide string to regular string
+#[cfg(windows)]
+fn wide_string_to_string(wide: &[u16]) -> String {
+    let null_pos = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+    String::from_utf16_lossy(&wide[..null_pos])
+}
+
+/// Remove Windows file attributes that prevent deletion
+#[cfg(windows)]
+fn remove_file_attributes(path: &Path) -> Result<()> {
+    let wide_path = path_to_wide_string(path);
+    
+    // Remove READ_ONLY, HIDDEN, and SYSTEM attributes
+    let result = unsafe {
+        SetFileAttributesW(wide_path.as_ptr(), 0) // 0 = FILE_ATTRIBUTE_NORMAL
+    };
+    
+    if result == 0 {
+        let error = unsafe { GetLastError() };
+        eprintln!("Warning: Failed to remove file attributes for {}: Error {}", 
+                  path.display(), error);
+        // Don't fail completely, just warn
+    }
+    
+    Ok(())
+}
+
+/// Schedule file for deletion on next reboot (Windows)
+#[cfg(windows)]
+fn schedule_deletion_on_reboot(path: &Path) -> Result<()> {
+    let wide_path = path_to_wide_string(path);
+    
+    let result = unsafe {
+        MoveFileExW(
+            wide_path.as_ptr(),
+            std::ptr::null(), // Delete on reboot
+            MOVEFILE_DELAY_UNTIL_REBOOT,
+        )
+    };
+    
+    if result == 0 {
+        let error = unsafe { GetLastError() };
+        return Err(anyhow::anyhow!(
+            "Failed to schedule deletion on reboot: Error {}", error
+        ));
+    }
+    
+    println!("Scheduled for deletion on next reboot: {}", path.display());
+    Ok(())
+}
+
+/// Enumerate all running processes - PROCWOLF style
+#[cfg(windows)]
+fn enumerate_processes() -> Result<Vec<ProcessInfo>> {
+    let mut processes = Vec::new();
+    
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(anyhow::anyhow!("Failed to create process snapshot"));
+    }
+    
+    let mut process_entry = ProcessEntry32W {
+        dw_size: mem::size_of::<ProcessEntry32W>() as u32,
+        cnt_usage: 0,
+        th32_process_id: 0,
+        th32_default_heap_id: 0,
+        th32_module_id: 0,
+        cnt_threads: 0,
+        th32_parent_process_id: 0,
+        pc_pri_class_base: 0,
+        dw_flags: 0,
+        sz_exe_file: [0; 260],
+    };
+    
+    let mut result = unsafe { Process32FirstW(snapshot, &mut process_entry) };
+    
+    while result != 0 {
+        let name = wide_string_to_string(&process_entry.sz_exe_file);
+        
+        // Try to get full path for this process
+        let path = get_process_path(process_entry.th32_process_id);
+        
+        processes.push(ProcessInfo {
+            pid: process_entry.th32_process_id,
+            name,
+            path,
+            parent_pid: process_entry.th32_parent_process_id,
+        });
+        
+        result = unsafe { Process32NextW(snapshot, &mut process_entry) };
+    }
+    
+    unsafe { CloseHandle(snapshot) };
+    
+    Ok(processes)
+}
+
+/// Get the full path of a process by PID
+#[cfg(windows)]
+fn get_process_path(pid: u32) -> Option<String> {
+    let process_handle = unsafe { 
+        OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) 
+    };
+    
+    if process_handle == ptr::null_mut() || process_handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    
+    let mut path_buffer: [u16; 512] = [0; 512];
+    let result = unsafe { 
+        GetProcessImageFileNameW(process_handle, path_buffer.as_mut_ptr(), 512) 
+    };
+    
+    unsafe { CloseHandle(process_handle) };
+    
+    if result > 0 {
+        Some(wide_string_to_string(&path_buffer[..result as usize]))
+    } else {
+        None
+    }
+}
+
+/// Kill a process by PID - inspired by your C++ code
+#[cfg(windows)]
+fn kill_process_by_pid(pid: u32, force: bool) -> Result<bool> {
+    println!("Attempting to terminate process PID: {}", pid);
+    
+    let process_handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    
+    if process_handle == ptr::null_mut() || process_handle == INVALID_HANDLE_VALUE {
+        let error = unsafe { GetLastError() };
+        return Err(anyhow::anyhow!("Failed to open process {}: Error {}", pid, error));
+    }
+    
+    let exit_code = if force { 1 } else { 0 };
+    let result = unsafe { TerminateProcess(process_handle, exit_code) };
+    
+    unsafe { CloseHandle(process_handle) };
+    
+    if result != 0 {
+        println!("Successfully terminated process PID: {}", pid);
+        Ok(true)
+    } else {
+        let error = unsafe { GetLastError() };
+        Err(anyhow::anyhow!("Failed to terminate process {}: Error {}", pid, error))
+    }
+}
+
+/// Kill processes by name pattern - PROCWOLF hunting mode
+#[cfg(windows)]
+fn kill_processes_by_name(name_pattern: &str, force: bool) -> Result<Vec<u32>> {
+    let processes = enumerate_processes()?;
+    let mut killed_pids = Vec::new();
+    
+    println!("Hunting for processes matching pattern: '{}'", name_pattern);
+    
+    for process in processes {
+        // Check if process name or path contains the pattern
+        let name_match = process.name.to_lowercase().contains(&name_pattern.to_lowercase());
+        let path_match = if let Some(ref path) = process.path {
+            path.to_lowercase().contains(&name_pattern.to_lowercase())
+        } else {
+            false
+        };
+        
+        if name_match || path_match {
+            println!("Found target: {} (PID: {}) - Path: {:?}", 
+                     process.name, process.pid, process.path);
+            
+            match kill_process_by_pid(process.pid, force) {
+                Ok(true) => {
+                    killed_pids.push(process.pid);
+                }
+                Ok(false) => {
+                    eprintln!("Failed to kill process {} (PID: {})", process.name, process.pid);
+                }
+                Err(e) => {
+                    eprintln!("Error killing process {} (PID: {}): {}", process.name, process.pid, e);
+                }
+            }
+        }
+    }
+    
+    Ok(killed_pids)
+}
+
+/// Suspend a process by PID - from your C++ suspend logic
+#[cfg(windows)]
+fn suspend_process_by_pid(pid: u32) -> Result<()> {
+    println!("Suspending all threads for process PID: {}", pid);
+    
+    let thread_snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if thread_snapshot == INVALID_HANDLE_VALUE {
+        return Err(anyhow::anyhow!("Failed to create thread snapshot"));
+    }
+    
+    let mut thread_entry = ThreadEntry32 {
+        dw_size: mem::size_of::<ThreadEntry32>() as u32,
+        cnt_usage: 0,
+        th32_thread_id: 0,
+        th32_owner_process_id: 0,
+        tpri_base: 0,
+        tpri_delta: 0,
+        dw_flags: 0,
+    };
+    
+    let mut result = unsafe { Thread32First(thread_snapshot, &mut thread_entry) };
+    let mut suspended_count = 0;
+    
+    while result != 0 {
+        if thread_entry.th32_owner_process_id == pid {
+            let thread_handle = unsafe { 
+                OpenThread(THREAD_SUSPEND_RESUME, 0, thread_entry.th32_thread_id) 
+            };
+            
+            if thread_handle != ptr::null_mut() && thread_handle != INVALID_HANDLE_VALUE {
+                unsafe { SuspendThread(thread_handle) };
+                unsafe { CloseHandle(thread_handle) };
+                suspended_count += 1;
+            }
+        }
+        
+        result = unsafe { Thread32Next(thread_snapshot, &mut thread_entry) };
+    }
+    
+    unsafe { CloseHandle(thread_snapshot) };
+    
+    if suspended_count > 0 {
+        println!("Suspended {} threads for process PID: {}", suspended_count, pid);
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("No threads found or suspended for PID: {}", pid))
+    }
+}
+
+/// Advanced file lock detection - simplified version
+#[cfg(windows)]
+fn find_file_lock_owners(path: &Path) -> Vec<u32> {
+    let mut lock_owners = Vec::new();
+    
+    // Convert path to compare against
+    let target_path = match path.canonicalize() {
+        Ok(canonical) => canonical.to_string_lossy().to_lowercase(),
+        Err(_) => path.to_string_lossy().to_lowercase(),
+    };
+    
+    // Get all processes
+    if let Ok(processes) = enumerate_processes() {
+        for process in processes {
+            // Check if process name suggests it might be locking the file
+            let process_name = process.name.to_lowercase();
+            
+            // Common file-locking processes and patterns
+            if process_name.contains("explorer") ||
+               process_name.contains("notepad") ||
+               process_name.contains("wordpad") ||
+               process_name.contains("winword") ||
+               process_name.contains("excel") ||
+               process_name.contains("powerpnt") ||
+               process_name.contains("outlook") ||
+               process_name.contains("acrobat") ||
+               process_name.contains("chrome") ||
+               process_name.contains("firefox") ||
+               process_name.contains("edge") ||
+               process_name.contains("photoshop") ||
+               process_name.contains("vlc") ||
+               process_name.contains("media") {
+                
+                lock_owners.push(process.pid);
+            }
+            
+            // Check if process path is in same directory as target file
+            if let Some(process_path) = process.path {
+                let proc_dir = std::path::Path::new(&process_path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                
+                let target_dir = path.parent()
+                    .map(|p| p.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                
+                if !proc_dir.is_empty() && !target_dir.is_empty() && proc_dir == target_dir {
+                    if !lock_owners.contains(&process.pid) {
+                        lock_owners.push(process.pid);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Remove system critical processes to avoid killing important stuff
+    lock_owners.retain(|&pid| {
+        if let Ok(processes) = enumerate_processes() {
+            if let Some(process) = processes.iter().find(|p| p.pid == pid) {
+                let name = process.name.to_lowercase();
+                // Don't kill critical system processes
+                !name.contains("system") &&
+                !name.contains("csrss") &&
+                !name.contains("winlogon") &&
+                !name.contains("services") &&
+                !name.contains("svchost") &&
+                !name.contains("dwm") &&
+                !name.contains("wininit")
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    });
+    
+    lock_owners
+}
+
+/// The PROCWOLF - Attempt to terminate processes that have a file locked
+#[cfg(windows)]
+fn terminate_lock_owners(path: &Path) -> Result<()> {
+    println!("PROCWOLF activated - hunting file lock owners for: {}", path.display());
+    
+    let pids = find_file_lock_owners(path);
+    
+    if pids.is_empty() {
+        println!("No obvious file lock owners detected");
+        return Ok(());
+    }
+    
+    println!("Found {} potential file lock owners:", pids.len());
+    
+    // Get process details before termination
+    let processes = enumerate_processes()?;
+    let mut targets = Vec::new();
+    
+    for pid in pids {
+        if let Some(process) = processes.iter().find(|p| p.pid == pid) {
+            println!("  - {} (PID: {}) - Path: {:?}", 
+                     process.name, process.pid, process.path);
+            targets.push(process.clone());
+        }
+    }
+    
+    if targets.is_empty() {
+        return Ok(());
+    }
+    
+    // Strategy 1: Try to suspend processes first (less aggressive)
+    println!("\nPhase 1: Attempting to suspend lock owners...");
+    for process in &targets {
+        match suspend_process_by_pid(process.pid) {
+            Ok(()) => println!(" Suspended: {} (PID: {})", process.name, process.pid),
+            Err(e) => eprintln!("  Failed to suspend {} (PID: {}): {}", process.name, process.pid, e),
+        }
+    }
+    
+    // Give a moment for file handles to be released
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    
+    // Test if file is now accessible
+    if test_file_access(path) {
+        println!("File is now accessible after suspension - lock owners neutralized!");
+        return Ok(());
+    }
+    
+    // Strategy 2: Terminate processes (more aggressive)
+    println!("\nPhase 2: File still locked - initiating termination protocol...");
+    
+    let mut terminated_count = 0;
+    for process in &targets {
+        // Skip certain "safer" processes in first pass
+        if process.name.to_lowercase().contains("explorer") {
+            println!("  Skipping explorer.exe (first pass) - PID: {}", process.pid);
+            continue;
+        }
+        
+        match kill_process_by_pid(process.pid, false) {
+            Ok(true) => {
+                println!("  Terminated: {} (PID: {})", process.name, process.pid);
+                terminated_count += 1;
+            }
+            Err(e) => {
+                eprintln!("  Failed to terminate {} (PID: {}): {}", process.name, process.pid, e);
+            }
+        }
+    }
+    
+    if terminated_count > 0 {
+        // Give time for cleanup
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        
+        if test_file_access(path) {
+            println!("File is now accessible after termination - PROCWOLF successful!");
+            return Ok(());
+        }
+    }
+    
+    // Strategy 3: Nuclear option - terminate everything including explorer
+    println!("\nPhase 3: Nuclear option - terminating all remaining lock owners...");
+    for process in &targets {
+        if process.name.to_lowercase().contains("explorer") {
+            println!(" Terminating explorer.exe - PID: {} (Windows shell will restart)", process.pid);
+        }
+        
+        match kill_process_by_pid(process.pid, true) {
+            Ok(true) => println!(" Force terminated: {} (PID: {})", process.name, process.pid),
+            Err(e) => eprintln!(" Failed to force terminate {} (PID: {}): {}", process.name, process.pid, e),
+        }
+    }
+    
+    // Final test
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    if test_file_access(path) {
+        println!("File is now accessible - PROCWOLF mission accomplished!");
+    } else {
+        println!("File may still be locked - manual intervention may be required");
+    }
+    
+    Ok(())
+}
+
+/// Show running processes that might be locking a file - diagnostic function
+#[cfg(windows)]
+pub fn show_potential_lock_owners(file_path: &Path) -> Result<()> {
+    println!("Scanning for potential lock owners of: {}", file_path.display());
+    
+    let pids = find_file_lock_owners(file_path);
+    
+    if pids.is_empty() {
+        println!("No obvious lock owners detected");
+        return Ok(());
+    }
+    
+    let processes = enumerate_processes()?;
+    
+    println!("Potential lock owners found:");
+    for pid in pids {
+        if let Some(process) = processes.iter().find(|p| p.pid == pid) {
+            println!("  PID: {} | Name: {} | Path: {:?}", 
+                     process.pid, process.name, process.path);
+        }
+    }
+    
+    Ok(())
+}
+
+/// Advanced process hunting by partial name match
+#[cfg(windows)]
+pub fn hunt_and_terminate(name_pattern: &str, force: bool, dry_run: bool) -> Result<Vec<u32>> {
+    println!("🐺 PROCWOLF hunting mode - searching for: '{}'", name_pattern);
+    
+    let processes = enumerate_processes()?;
+    let mut targets = Vec::new();
+    
+    // Find matching processes
+    for process in processes {
+        let name_match = process.name.to_lowercase().contains(&name_pattern.to_lowercase());
+        let path_match = if let Some(ref path) = process.path {
+            path.to_lowercase().contains(&name_pattern.to_lowercase())
+        } else {
+            false
+        };
+        
+        if name_match || path_match {
+            targets.push(process);
+        }
+    }
+    
+    if targets.is_empty() {
+        println!("No processes found matching pattern: '{}'", name_pattern);
+        return Ok(Vec::new());
+    }
+    
+    println!("Found {} matching processes:", targets.len());
+    for target in &targets {
+        println!("  - {} (PID: {}) - Path: {:?}", target.name, target.pid, target.path);
+    }
+    
+    if dry_run {
+        println!("DRY RUN: Would terminate {} processes", targets.len());
+        return Ok(targets.iter().map(|p| p.pid).collect());
+    }
+    
+    // Confirm termination for multiple processes
+    if targets.len() > 1 {
+        print!("Terminate {} processes? [y/N]: ", targets.len());
+        std::io::stdout().flush().unwrap();
+        
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        
+        if !input.trim().to_lowercase().starts_with('y') {
+            println!("Operation cancelled");
+            return Ok(Vec::new());
+        }
+    }
+    
+    let mut killed_pids = Vec::new();
+    
+    for target in &targets {
+        match kill_process_by_pid(target.pid, force) {
+            Ok(true) => {
+                println!("Terminated: {} (PID: {})", target.name, target.pid);
+                killed_pids.push(target.pid);
+            }
+            Ok(false) => {
+                eprintln!("Failed to terminate {} (PID: {})", target.name, target.pid);
+            }
+            Err(e) => {
+                eprintln!("Failed to terminate {} (PID: {}): {}", target.name, target.pid, e);
+            }
+        }
+    }
+    
+    println!("PROCWOLF hunt complete - {} processes terminated", killed_pids.len());
+    Ok(killed_pids)
+}
+
+/// Resume all threads of a previously suspended process
+#[cfg(windows)]
+pub fn resume_process_by_pid(pid: u32) -> Result<()> {
+    println!("Resuming all threads for process PID: {}", pid);
+    
+    let thread_snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if thread_snapshot == INVALID_HANDLE_VALUE {
+        return Err(anyhow::anyhow!("Failed to create thread snapshot"));
+    }
+    
+    let mut thread_entry = ThreadEntry32 {
+        dw_size: mem::size_of::<ThreadEntry32>() as u32,
+        cnt_usage: 0,
+        th32_thread_id: 0,
+        th32_owner_process_id: 0,
+        tpri_base: 0,
+        tpri_delta: 0,
+        dw_flags: 0,
+    };
+    
+    let mut result = unsafe { Thread32First(thread_snapshot, &mut thread_entry) };
+    let mut resumed_count = 0;
+    
+    while result != 0 {
+        if thread_entry.th32_owner_process_id == pid {
+            let thread_handle = unsafe { 
+                OpenThread(THREAD_SUSPEND_RESUME, 0, thread_entry.th32_thread_id) 
+            };
+            
+            if thread_handle != ptr::null_mut() && thread_handle != INVALID_HANDLE_VALUE {
+                unsafe { ResumeThread(thread_handle) };
+                unsafe { CloseHandle(thread_handle) };
+                resumed_count += 1;
+            }
+        }
+        
+        result = unsafe { Thread32Next(thread_snapshot, &mut thread_entry) };
+    }
+    
+    unsafe { CloseHandle(thread_snapshot) };
+    
+    if resumed_count > 0 {
+        println!("Resumed {} threads for process PID: {}", resumed_count, pid);
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("No threads found or resumed for PID: {}", pid))
+    }
+}
+
+/// List all running processes with detailed information
+#[cfg(windows)]
+pub fn list_all_processes(filter: Option<&str>) -> Result<()> {
+    let processes = enumerate_processes()?;
+    
+    let filtered_processes: Vec<_> = if let Some(filter_str) = filter {
+        processes.into_iter()
+            .filter(|p| {
+                p.name.to_lowercase().contains(&filter_str.to_lowercase()) ||
+                p.path.as_ref().map_or(false, |path| 
+                    path.to_lowercase().contains(&filter_str.to_lowercase()))
+            })
+            .collect()
+    } else {
+        processes
+    };
+    
+    if filtered_processes.is_empty() {
+        println!("No processes found{}", 
+                 filter.map_or(String::new(), |f| format!(" matching '{}'", f)));
+        return Ok(());
+    }
+    
+    println!("\n{:-<120}", "");
+    println!("{:>8} | {:>8} | {:<30} | {}", "PID", "PPID", "Process Name", "Path");
+    println!("{:-<120}", "");
+    
+    for process in &filtered_processes {
+        let path_display = process.path.as_deref().unwrap_or("N/A");
+        println!("{:>8} | {:>8} | {:<30} | {}", 
+                 process.pid, 
+                 process.parent_pid, 
+                 &process.name[..process.name.len().min(30)], 
+                 path_display);
+    }
+    
+    println!("{:-<120}", "");
+    println!("Total: {} processes{}", 
+             filtered_processes.len(),
+             filter.map_or(String::new(), |f| format!(" (filtered by '{}')", f)));
+    
+    Ok(())
+}
+
+/// Emergency process termination - kill by PID with maximum force
+#[cfg(windows)]
+pub fn emergency_terminate(pid: u32) -> Result<()> {
+    println!("EMERGENCY TERMINATION for PID: {}", pid);
+    
+    // First try to get process info
+    if let Ok(processes) = enumerate_processes() {
+        if let Some(process) = processes.iter().find(|p| p.pid == pid) {
+            println!("Target: {} - Path: {:?}", process.name, process.path);
+            
+            // Warn about critical processes
+            let name_lower = process.name.to_lowercase();
+            if name_lower.contains("system") || 
+               name_lower.contains("csrss") || 
+               name_lower.contains("winlogon") ||
+               name_lower.contains("services") {
+                println!(" WARNING: This appears to be a critical system process!");
+                print!("Continue with termination? [y/N]: ");
+                std::io::stdout().flush().unwrap();
+                
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input).unwrap();
+                
+                if !input.trim().to_lowercase().starts_with('y') {
+                    println!("Emergency termination cancelled");
+                    return Ok(());
+                }
+            }
+        }
+    }
+    
+    // Try progressive termination methods
+    println!("Phase 1: Attempting graceful termination...");
+    match kill_process_by_pid(pid, false) {
+        Ok(true) => {
+            println!("✓ Process terminated gracefully");
+            return Ok(());
+        }
+        Ok(false) => {
+            eprintln!("Graceful termination returned false");
+        }
+        Err(e) => {
+            eprintln!("Graceful termination failed: {}", e);
+        }
+    }
+    
+    println!("Phase 2: Attempting forced termination...");
+    match kill_process_by_pid(pid, true) {
+        Ok(true) => {
+            println!("✓ Process force terminated");
+            return Ok(());
+        }
+        Ok(false) => {
+            eprintln!("Force termination returned false");
+        }
+        Err(e) => {
+            eprintln!("Force termination failed: {}", e);
+        }
+    }
+    
+    println!("Phase 3: Attempting thread suspension...");
+    match suspend_process_by_pid(pid) {
+        Ok(()) => {
+            println!("✓ Process threads suspended");
+            
+            // Wait a moment then try termination again
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            
+            match kill_process_by_pid(pid, true) {
+                Ok(true) => {
+                    println!("✓ Suspended process terminated");
+                    return Ok(());
+                }
+                Ok(false) => {
+                    eprintln!("Suspended process termination returned false");
+                }
+                Err(e) => {
+                    eprintln!("Failed to terminate suspended process: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Thread suspension failed: {}", e);
+        }
+    }
+    
+    Err(anyhow::anyhow!("All emergency termination methods failed for PID: {}", pid))
+}
+
+/// Get detailed information about a specific process
+#[cfg(windows)]
+pub fn get_process_details(pid: u32) -> Result<ProcessInfo> {
+    let processes = enumerate_processes()?;
+    
+    processes.into_iter()
+        .find(|p| p.pid == pid)
+        .ok_or_else(|| anyhow::anyhow!("Process with PID {} not found", pid))
+}
+
+/// Check if current process has admin privileges
+#[cfg(windows)]
+pub fn is_admin() -> bool {
+    use std::ptr;
+    
+    #[repr(C)]
+    struct SidIdentifierAuthority {
+        value: [u8; 6],
+    }
+    
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn CheckTokenMembership(
+            TokenHandle: *mut std::ffi::c_void,
+            SidToCheck: *mut std::ffi::c_void,
+            IsMember: *mut i32,
+        ) -> i32;
+        
+        fn AllocateAndInitializeSid(
+            pIdentifierAuthority: *const SidIdentifierAuthority,
+            nSubAuthorityCount: u8,
+            nSubAuthority0: u32,
+            nSubAuthority1: u32,
+            nSubAuthority2: u32,
+            nSubAuthority3: u32,
+            nSubAuthority4: u32,
+            nSubAuthority5: u32,
+            nSubAuthority6: u32,
+            nSubAuthority7: u32,
+            pSid: *mut *mut std::ffi::c_void,
+        ) -> i32;
+        
+        fn FreeSid(pSid: *mut std::ffi::c_void);
+    }
+    
+    const SECURITY_NT_AUTHORITY: SidIdentifierAuthority = SidIdentifierAuthority {
+        value: [0, 0, 0, 0, 0, 5],
+    };
+    const SECURITY_BUILTIN_DOMAIN_RID: u32 = 0x00000020;
+    const DOMAIN_ALIAS_RID_ADMINS: u32 = 0x00000220;
+    
+    let mut admin_group: *mut std::ffi::c_void = ptr::null_mut();
+    let mut is_member: i32 = 0;
+    
+    let result = unsafe {
+        AllocateAndInitializeSid(
+            &SECURITY_NT_AUTHORITY,
+            2,
+            SECURITY_BUILTIN_DOMAIN_RID,
+            DOMAIN_ALIAS_RID_ADMINS,
+            0, 0, 0, 0, 0, 0,
+            &mut admin_group,
+        )
+    };
+    
+    if result != 0 {
+        let check_result = unsafe {
+            CheckTokenMembership(ptr::null_mut(), admin_group, &mut is_member)
+        };
+        
+        unsafe { FreeSid(admin_group) };
+        
+        check_result != 0 && is_member != 0
+    } else {
+        false
+    }
+}
+
+/// PROCWOLF status and system information
+#[cfg(windows)]
+pub fn procwolf_status() -> Result<()> {
+    println!("PROCWOLF System Status");
+    println!("{:-<50}", "");
+    
+    // Check admin privileges
+    let is_admin = is_admin();
+    println!("Administrator privileges: {}", if is_admin { "YES" } else { "NO" });
+    
+    if !is_admin {
+        println!("Some PROCWOLF functions require administrator privileges");
+    }
+    
+    // Get current process info
+    let current_pid = unsafe { GetCurrentProcessId() };
+    println!("PROCWOLF PID: {}", current_pid);
+    
+    // Count total processes
+    match enumerate_processes() {
+        Ok(processes) => {
+            println!("Total processes visible: {}", processes.len());
+            
+            // Count by type
+            let mut system_processes = 0;
+            let mut user_processes = 0;
+            
+            for process in &processes {
+                if process.name.to_lowercase().contains("system") ||
+                   process.name.to_lowercase().contains("svchost") ||
+                   process.name.to_lowercase().contains("csrss") {
+                    system_processes += 1;
+                } else {
+                    user_processes += 1;
+                }
+            }
+            
+            println!("  - System processes: ~{}", system_processes);
+            println!("  - User processes: ~{}", user_processes);
+        }
+        Err(e) => {
+            eprintln!("Failed to enumerate processes: {}", e);
+        }
+    }
+    
+    println!("{:-<50}", "");
+    println!("PROCWOLF ready for deployment");
+    
+    Ok(())
+}
+
+// Non-Windows stubs to make the code compile on other platforms
+#[cfg(not(windows))]
+fn terminate_lock_owners(_path: &Path) -> Result<()> {
+    eprintln!("Process termination is only implemented for Windows");
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn deploy_procwolf(_file_path: &Path) -> Result<()> {
+    eprintln!("PROCWOLF is only available on Windows");
+    Err(anyhow::anyhow!("PROCWOLF not supported on this platform"))
+}
+
+#[cfg(not(windows))]
+pub fn show_potential_lock_owners(_file_path: &Path) -> Result<()> {
+    eprintln!("Lock owner detection is only available on Windows");
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn hunt_and_terminate(_name_pattern: &str, _force: bool, _dry_run: bool) -> Result<Vec<u32>> {
+    eprintln!("Process hunting is only available on Windows");
+    Ok(Vec::new())
+}
+
+#[cfg(not(windows))]
+pub fn list_all_processes(_filter: Option<&str>) -> Result<()> {
+    eprintln!("Detailed process listing is only available on Windows");
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn emergency_terminate(_pid: u32) -> Result<()> {
+    eprintln!("Emergency termination is only available on Windows");
+    Err(anyhow::anyhow!("Emergency termination not supported on this platform"))
+}
+
+#[cfg(not(windows))]
+pub fn procwolf_status() -> Result<()> {
+    println!("PROCWOLF is only available on Windows");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_secure_delete_simple_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test_file.txt");
+        
+        // Create a test file
+        {
+            let mut file = File::create(&file_path).unwrap();
+            file.write_all(b"This is test content that should be securely deleted").unwrap();
+        }
+        
+        // Ensure file exists
+        assert!(file_path.exists());
+        
+        // Secure delete
+        let result = secure_delete(&file_path);
+        
+        // File should be gone
+        assert!(!file_path.exists());
+        assert!(result.is_ok());
+    }
+    
+    #[test]
+    fn test_secure_delete_nonexistent_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("nonexistent.txt");
+        
+        let result = secure_delete(&file_path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("File does not exist"));
+    }
+    
+    #[cfg(windows)]
+    #[test]
+    fn test_process_enumeration() {
+        let result = enumerate_processes();
+        assert!(result.is_ok());
+        
+        let processes = result.unwrap();
+        assert!(!processes.is_empty());
+        
+        // Should find at least some common Windows processes
+        let has_system_process = processes.iter()
+            .any(|p| p.name.to_lowercase().contains("system") || 
+                     p.name.to_lowercase().contains("explorer"));
+        assert!(has_system_process);
+    }
+    
+    #[cfg(windows)]
+    #[test]
+    fn test_admin_check() {
+        // This test just ensures the function doesn't panic
+        let _is_admin = is_admin();
+        // We can't assert the result since it depends on how tests are run
+    }
+}
+
+/// Example usage and CLI interface
+pub fn main() {
+    println!("PROCWOLF Enhanced Secure Delete System");
+    println!("==========================================");
+    
+    #[cfg(windows)]
+    {
+        if let Err(e) = procwolf_status() {
+            eprintln!("Failed to get PROCWOLF status: {}", e);
+        }
+    }
+    
+    // Example usage patterns:
+    println!("\nExample usage:");
+    println!("  secure_delete(Path::new(\"locked_file.txt\"))");
+    println!("  deploy_procwolf(Path::new(\"stubborn_file.exe\"))");
+    println!("  hunt_and_terminate(\"malware\", true, false)");
+    println!("  emergency_terminate(1234)");
+    println!("  list_all_processes(Some(\"chrome\"))");
+}
+
+/// Cross-platform secure delete with Windows-specific stubborn file handling
+pub fn secure_delete(file_path: &Path) -> Result<()> {
+    let path = if file_path.is_relative() {
+        std::env::current_dir()?.join(file_path)
+    } else {
+        file_path.to_path_buf()
+    };
+    
+    // Check if file exists
+    if !path.exists() {
+        return Err(anyhow::anyhow!("File does not exist: {}", path.display()));
+    }
+    
+    // Get file metadata
+    let metadata = std::fs::metadata(&path)
+        .with_context(|| format!("Failed to get metadata for: {}", path.display()))?;
+    
+    let file_size = metadata.len() as usize;
+    
+    println!("Attempting secure deletion of: {} ({} bytes)", path.display(), file_size);
+    
+    #[cfg(windows)]
+    {
+        // Step 1: Remove restrictive attributes
+        if let Err(e) = remove_file_attributes(&path) {
+            eprintln!("Warning: Could not remove file attributes: {}", e);
+        }
+    }
+    
+    // Step 2: Attempt secure overwrite
+    if file_size > 0 {
+        match secure_overwrite(&path, file_size) {
+            Ok(_) => println!("Successfully overwrote file data"),
+            Err(e) => {
+                eprintln!("Warning: Could not overwrite file data: {}", e);
+                
+                #[cfg(windows)]
+                {
+                    // Step 3: Try to identify and terminate lock owners
+                    if let Err(e) = terminate_lock_owners(&path) {
+                        eprintln!("Warning: Could not handle file locks: {}", e);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Step 4: Attempt standard deletion
+    match std::fs::remove_file(&path) {
+        Ok(_) => {
+            println!("Successfully deleted: {}", path.display());
+            return Ok(());
+        }
+        Err(e) => {
+            eprintln!("Standard deletion failed: {}", e);
+            
+            #[cfg(windows)]
+            {
+                // Step 5: Schedule for deletion on reboot (Windows only)
+                println!("Attempting to schedule deletion on next reboot...");
+                match schedule_deletion_on_reboot(&path) {
+                    Ok(_) => return Ok(()),
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "All deletion methods failed. Last error: {}", e
+                        ));
+                    }
+                }
+            }
+            
+            #[cfg(not(windows))]
+            {
+                return Err(anyhow::anyhow!(
+                    "Could not delete file: {}. Manual intervention required.", e
+                ));
+            }
+        }
+    }
+}
+
+/// Perform secure overwrite of file contents
+fn secure_overwrite(path: &Path, file_size: usize) -> Result<()> {
+    // Open file for writing (don't truncate to preserve size)
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("Failed to open file for overwriting: {}", path.display()))?;
+    
+    const PASSES: u8 = 3;
+    let mut rng = rand::thread_rng();
+    
+    for pass in 1..=PASSES {
+        println!("  Overwrite pass {}/{}", pass, PASSES);
+        
+        // Seek to beginning
+        file.seek(std::io::SeekFrom::Start(0))
+            .with_context(|| format!("Failed to seek to start on pass {}", pass))?;
+        
+        // Generate and write random data in chunks for large files
+        const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
+        let mut remaining = file_size;
+        
+        while remaining > 0 {
+            let chunk_size = remaining.min(CHUNK_SIZE);
+            let mut random_data = vec![0u8; chunk_size];
+            rng.fill_bytes(&mut random_data);
+            
+            file.write_all(&random_data)
+                .with_context(|| format!("Failed to write random data on pass {}", pass))?;
+            
+            remaining -= chunk_size;
+        }
+        
+        // Force flush to disk
+        file.sync_all()
+            .with_context(|| format!("Failed to sync file on pass {}", pass))?;
+    }
+    
+    Ok(())
+}
+
+/// Secure delete with retry logic and multiple strategies
+pub fn secure_delete_with_retry(file_path: &Path, max_retries: u32) -> Result<()> {
+    let mut last_error = None;
+    
+    for attempt in 1..=max_retries {
+        match secure_delete(file_path) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                last_error = Some(e);
+                if attempt < max_retries {
+                    println!("Deletion attempt {} failed, retrying...", attempt);
+                    std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+                }
+            }
+        }
+    }
+    
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Unknown error")))
+}
+
+/// Batch secure delete multiple files
+pub fn secure_delete_batch<P: AsRef<Path>>(file_paths: &[P]) -> Result<()> {
+    let mut failed_files = Vec::new();
+    
+    for (i, path) in file_paths.iter().enumerate() {
+        let path = path.as_ref();
+        println!("Processing file {}/{}: {}", i + 1, file_paths.len(), path.display());
+        
+        match secure_delete_with_retry(path, 3) {
+            Ok(_) => {},
+            Err(e) => {
+                eprintln!("Failed to delete {}: {}", path.display(), e);
+                failed_files.push(path.to_path_buf());
+            }
+        }
+    }
+    
+    if !failed_files.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Failed to delete {} files: {:?}", 
+            failed_files.len(), 
+            failed_files
+        ));
+    }
+    
+    Ok(())
+}
